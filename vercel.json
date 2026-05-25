@@ -1,0 +1,43 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "next build",
+  "installCommand": "npm install",
+  "outputDirectory": ".next",
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "0 */6 * * *"
+    }
+  ],
+  "functions": {
+    "app/api/agent/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/cron/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/auth/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/callback/route.ts": {
+      "maxDuration": 30
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store, no-cache, must-revalidate"
+        }
+      ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/health",
+      "destination": "/api/agent"
+    }
+  ]
+}
