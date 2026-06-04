@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const SHOPIFY_CONFIG = {
   clientId: process.env.SHOPIFY_CLIENT_ID || '',
-  store: process.env.SHOPIFY_STORE || '',
+  store: process.env.SHOPIFY_STORE || 'carehub1.myshopify.com',
   scopes: [
     'read_products',
     'write_products',
