@@ -25,7 +25,6 @@
       "@/app/*": ["./app/*"]
     },
     "baseUrl": ".",
-    "ignoreDeprecations": "6.0",
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,

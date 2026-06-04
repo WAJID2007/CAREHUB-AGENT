@@ -257,7 +257,7 @@ export class AIRouter {
   // MAIN ROUTING METHOD
   // --------------------------------------------
 
-  async route(task: RouterTask): Promise<routerresponse> {
+  async route(task: RouterTask): Promise<RouterResponse> {
     const startTime = Date.now();
     this.totalRequests++;
 
