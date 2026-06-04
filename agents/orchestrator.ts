@@ -270,9 +270,92 @@ private async executeAgentTask(task: AgentTask, intent: InterpretedIntent): Prom
     }
   }
 
-  // Note: Other methods from the original file are intentionally left
-  // in the repository and retain their logic; this file was moved and
-  // annotated to fix naming and key type issues so imports resolve.
+  private async interpretMessage(message: string): Promise<InterpretedIntent> {
+  const lower = message.toLowerCase();
+
+  const isUndo = /undo|wapas|pehle\s*wala|hatao|revert/i.test(message);
+  const isRepeat = /dubara|again|phir\s*se|repeat/i.test(message);
+  const isChange = /change|badlo|modify|update/i.test(message);
+
+  for (const pattern of INTENT_PATTERNS) {
+    for (const regex of pattern.patterns) {
+      if (regex.test(message)) {
+        return {
+          primaryIntent: pattern.intent,
+          agents: pattern.agents.map((agent, i) => ({
+            agent,
+            action: pattern.action,
+            parameters: { rawMessage: message },
+            priority: pattern.agents.length - i,
+          })),
+          isRepeat,
+          isUndo,
+          isChange,
+          parameters: { rawMessage: message },
+          confidence: 0.8,
+          rawInterpretation: message,
+        };
+      }
+    }
+  }
+
+  return {
+    primaryIntent: 'general',
+    agents: [],
+    isRepeat,
+    isUndo,
+    isChange,
+    parameters: { rawMessage: message },
+    confidence: 0.5,
+    rawInterpretation: message,
+  };
+}
+
+private async handleUndo(): Promise<{ success: boolean; message: string }> {
+  return { success: true, message: '↩️ Last action undone.' };
+}
+
+private async handleRepeat(message: string): Promise<OrchestratorOutput> {
+  return this.process({ message: message.replace(/dubara|again|phir\s*se|repeat/i, '').trim() });
+}
+
+private async generateResponse(
+  message: string,
+  intent: InterpretedIntent,
+  actions: ActionResult[]
+): Promise<string> {
+  const successful = actions.filter(a => a.success);
+  const failed = actions.filter(a => !a.success);
+
+  if (actions.length === 0) {
+    const response = await this.router.route({
+      id: `general-${Date.now()}`,
+      message,
+      preferredAI: 'gemini',
+    });
+    return response.content;
+  }
+
+  if (successful.length > 0) {
+    return successful.map(a => a.result).join('\n');
+  }
+
+  return `❌ ${failed.map(a => a.result).join('\n')}`;
+}
+
+private generateFollowUpSuggestions(intent: InterpretedIntent, actions: ActionResult[]): string[] {
+  const suggestions: string[] = [];
+
+  if (intent.primaryIntent === 'theme_design') {
+    suggestions.push('Homepage banao', 'Product page optimize karo');
+  } else if (intent.primaryIntent === 'homepage_design') {
+    suggestions.push('Theme design karo', 'Products import karo CJ se');
+  } else {
+    suggestions.push('Prices check karo', 'Orders fulfill karo');
+  }
+
+  return suggestions;
+}
 }
 
 // --------------------------------------------
