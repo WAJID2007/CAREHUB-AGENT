@@ -130,7 +130,36 @@ export class Orchestrator {
     this.router = getAIRouter();
     this.memoryAgent = getMemoryAgent();
   }
+registerHandler(agentName: string, handler: AgentHandler): void {
+  this.agentHandlers.set(agentName, handler);
+}
 
+private async executeAgentTask(task: AgentTask, intent: InterpretedIntent): Promise<ActionResult> {
+  const startTime = Date.now();
+  const handler = this.agentHandlers.get(task.agent);
+  
+  if (!handler) {
+    return {
+      agent: task.agent,
+      action: task.action,
+      success: false,
+      result: `No handler registered for agent: ${task.agent}`,
+      duration: Date.now() - startTime,
+    };
+  }
+
+  try {
+    return await handler(task, intent.rawInterpretation);
+  } catch (error) {
+    return {
+      agent: task.agent,
+      action: task.action,
+      success: false,
+      result: error instanceof Error ? error.message : 'Unknown error',
+      duration: Date.now() - startTime,
+    };
+  }
+}
   // --------------------------------------------
   // MAIN PROCESS METHOD
   // --------------------------------------------
