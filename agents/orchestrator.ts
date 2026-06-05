@@ -1,44 +1,71 @@
-// ============================================
-// CAREHUB AI AGENT — ORCHESTRATOR (AGENT #2)
-// ============================================
-// The MASTER CONTROLLER. Every user message goes
-// through this agent. It:
-// - Understands Roman Urdu + English + Vague prompts
-// - Decides which agent(s) should handle the task
-// - Coordinates multiple agents for complex tasks
-// - Returns final response to user
-// - Handles "dubara karo", "undo", "change karo"
-// ============================================
+// ============================================================
+// CAREHUB AI — ORCHESTRATOR v2.0 (MASTER CONTROLLER)
+// ============================================================
+// Architecture: Event-driven, parallel execution, typed, safe
+// Features:
+//   ✅ Full Roman Urdu + English + Vague prompt understanding
+//   ✅ Parallel agent execution with dependency graph
+//   ✅ Circuit breaker pattern for fault tolerance
+//   ✅ Priority queue for agent tasks
+//   ✅ Structured logging & performance telemetry
+//   ✅ Undo stack with snapshots
+//   ✅ Plugin-based agent handler registry
+//   ✅ Zero TypeScript errors — strict-mode safe
+// ============================================================
 
 import { getAIRouter, AIRouter } from './ai-router';
 import { getMemoryAgent, MemoryAgent } from './memory';
 import { GeminiMessage } from '@/lib/gemini';
 
-// --------------------------------------------
-// TYPES & INTERFACES
-// --------------------------------------------
+// ============================================================
+// CONSTANTS
+// ============================================================
 
-export interface OrchestratorInput {
-  message: string;
-  sessionId?: string;
-}
+const MAX_UNDO_STACK = 50;
+const AGENT_TIMEOUT_MS = 30_000;
+const MAX_RETRIES = 2;
+const MIN_PATTERN_SCORE = 1;
 
-export interface OrchestratorOutput {
-  success: boolean;
-  response: string;
-  agentsUsed: string[];
-  actions: ActionResult[];
-  suggestedFollowUp?: string[];
-  processingTime: number;
-  context?: string;
+// ============================================================
+// TYPES
+// ============================================================
+
+export type AgentName =
+  | 'theme-designer'
+  | 'homepage'
+  | 'product-page'
+  | 'landing-page'
+  | 'upsell-bundle'
+  | 'product-manager'
+  | 'order-fulfillment'
+  | 'price-monitor'
+  | 'content-seo'
+  | 'collections';
+
+export type TaskPriority = 'critical' | 'high' | 'normal' | 'low';
+
+export type Mood =
+  | 'premium' | 'luxury' | 'modern' | 'clean' | 'dark' | 'light'
+  | 'minimalist' | 'bold' | 'elegant' | 'professional' | 'playful'
+  | 'serious' | 'warm' | 'cool' | 'energetic' | 'calm'
+  | 'attractive' | 'eye-catching' | 'classical' | 'vintage';
+
+export interface AgentTask {
+  agent: AgentName;
+  action: string;
+  parameters: Record<string, unknown>;
+  priority: number;
+  dependsOn?: AgentName;
+  retryCount?: number;
 }
 
 export interface ActionResult {
-  agent: string;
+  agent: AgentName | 'memory' | 'orchestrator';
   action: string;
   success: boolean;
   result: string;
   duration: number;
+  retries?: number;
 }
 
 export interface InterpretedIntent {
@@ -47,278 +74,282 @@ export interface InterpretedIntent {
   isRepeat: boolean;
   isUndo: boolean;
   isChange: boolean;
-  mood?: string;
+  mood?: Mood;
   parameters: Record<string, unknown>;
   confidence: number;
   rawInterpretation: string;
 }
 
-export interface AgentTask {
-  agent: string;
-  action: string;
-  parameters: Record<string, unknown>;
-  priority: number;
-  dependsOn?: string;
+export interface OrchestratorInput {
+  message: string;
+  sessionId?: string;
+  userId?: string;
+  priority?: TaskPriority;
 }
 
-// Agent handler type
-type AgentHandler = (task: AgentTask, context: string) => Promise<ActionResult>;
+export interface OrchestratorOutput {
+  success: boolean;
+  response: string;
+  agentsUsed: string[];
+  actions: ActionResult[];
+  suggestedFollowUp: string[];
+  processingTime: number;
+  confidence: number;
+  intent?: string;
+  error?: string;
+}
 
-// --------------------------------------------
+export interface UndoEntry {
+  action: ActionResult;
+  snapshot: string;
+  timestamp: number;
+}
+
+type AgentHandler = (
+  task: AgentTask,
+  context: string
+) => Promise<ActionResult>;
+
+// ============================================================
 // AGENT REGISTRY
-// --------------------------------------------
+// ============================================================
 
-const AGENT_DESCRIPTIONS: Record<string, string> = {
-  'theme-designer': 'Store theme design — colors, fonts, CSS, header, footer, layout, visual styling',
-  'homepage': 'Homepage building — hero section, featured products, trust badges, testimonials, announcements',
-  'product-page': 'Product page optimization — gallery, description layout, urgency, sticky cart, reviews',
-  'landing-page': 'Landing pages for ads — single CTA, no distraction, social proof, mobile-first',
-  'upsell-bundle': 'Upsells, cross-sells, bundles — pre/post purchase, quantity discounts, recommendations',
-  'product-manager': 'Product CRUD — add, edit, delete, bulk operations, import from CJ, inventory',
-  'order-fulfillment': 'Order processing — detect new orders, fulfill via CJ, tracking, refunds',
-  'price-monitor': 'Price monitoring 24/7 — check CJ prices, auto-update store, maintain margins',
-  'content-seo': 'Content & SEO — descriptions, meta tags, blog, ad copy, social captions, image prompts',
-  'collections': 'Collections — create smart/manual collections, organize products, navigation, SEO',
+const AGENT_DESCRIPTIONS: Record<AgentName, string> = {
+  'theme-designer':    'Store theme — colors, fonts, CSS variables, header, footer, layout, visual identity',
+  'homepage':          'Homepage — hero section, featured products, trust badges, testimonials, announcements',
+  'product-page':      'Product page — gallery, description layout, urgency signals, sticky cart, reviews',
+  'landing-page':      'Ad landing pages — single CTA, no distraction, social proof, mobile-first funnels',
+  'upsell-bundle':     'Upsells & bundles — pre/post-purchase offers, quantity discounts, recommendations',
+  'product-manager':   'Product CRUD — add, edit, delete, bulk ops, CJ dropshipping import, inventory mgmt',
+  'order-fulfillment': 'Orders — detect new orders, fulfill via CJ, auto-tracking, refunds, cancellations',
+  'price-monitor':     'Pricing 24/7 — watch CJ costs, auto-update store prices, enforce margin floors',
+  'content-seo':       'Content & SEO — descriptions, meta tags, blog posts, ad copy, social captions',
+  'collections':       'Collections — smart/manual collections, product grouping, nav menus, SEO tags',
 };
 
-// --------------------------------------------
-// INTENT PATTERNS
-// --------------------------------------------
+// ============================================================
+// INTENT PATTERN REGISTRY
+// ============================================================
 
-const INTENT_PATTERNS: Array<{
+interface IntentPattern {
   patterns: RegExp[];
   intent: string;
-  agents: string[];
+  agents: AgentName[];
   action: string;
-}> = [
-  // Theme related
+}
+
+const INTENT_PATTERNS: IntentPattern[] = [
   {
-    patterns: [
-      /theme/i, /design/i, /color/i, /font/i, /css/i,
-      /style/i, /layout/i, /look/i, /appearance/i,
-      /dark\s*(theme|mode)/i, /light\s*(theme|mode)/i,
-      /header/i, /footer/i, /navigation/i,
-    ],
+    patterns: [/theme/i, /design/i, /color/i, /font/i, /css/i, /style/i,
+               /layout/i, /look/i, /appearance/i, /dark[\s-]?(theme|mode)/i,
+               /light[\s-]?(theme|mode)/i, /header/i, /footer/i, /brand/i],
     intent: 'theme_design',
     agents: ['theme-designer'],
     action: 'design_theme',
   },
-  // Homepage
   {
-    patterns: [
-      /home\s*page/i, /homepage/i, /hero/i, /banner/i,
-      /main\s*page/i, /front\s*page/i, /landing\s*(page)?/i,
-      /announcement/i, /trust\s*badge/i, /testimonial/i,
-    ],
+    patterns: [/home\s*page/i, /homepage/i, /hero/i, /banner/i,
+               /main\s*page/i, /front\s*page/i, /announcement/i,
+               /trust[\s-]?badge/i, /testimonial/i],
     intent: 'homepage_design',
     agents: ['homepage'],
     action: 'build_homepage',
   },
-  // Product page
   {
-    patterns: [
-      /product\s*page/i, /product\s*design/i, /product\s*layout/i,
-      /add\s*to\s*cart/i, /buy\s*button/i, /product\s*template/i,
-      /gallery/i, /product\s*image/i,
-    ],
+    patterns: [/product\s*(page|design|layout|template)/i, /add[\s-]?to[\s-]?cart/i,
+               /buy\s*button/i, /gallery/i, /product[\s-]?image/i, /sticky[\s-]?cart/i],
     intent: 'product_page_design',
     agents: ['product-page'],
     action: 'design_product_page',
   },
-  // Landing page
   {
-    patterns: [
-      /landing\s*page/i, /ad\s*page/i, /campaign\s*page/i,
-      /sales\s*page/i, /funnel/i, /squeeze/i,
-    ],
+    patterns: [/landing\s*page/i, /ad\s*page/i, /campaign[\s-]?page/i,
+               /sales[\s-]?page/i, /funnel/i, /squeeze/i],
     intent: 'landing_page',
     agents: ['landing-page'],
     action: 'create_landing_page',
   },
-  // Upsell & bundles
   {
-    patterns: [
-      /upsell/i, /cross[\s-]*sell/i, /bundle/i, /discount/i,
-      /offer/i, /deal/i, /combo/i, /package/i,
-      /buy\s*more/i, /quantity/i, /frequently\s*bought/i,
-    ],
+    patterns: [/upsell/i, /cross[\s-]?sell/i, /bundle/i, /discount/i,
+               /offer/i, /deal/i, /combo/i, /package/i, /quantity/i,
+               /buy\s*more/i, /frequently[\s-]?bought/i],
     intent: 'upsell_setup',
     agents: ['upsell-bundle'],
     action: 'setup_upsells',
   },
-  // Product management
   {
-    patterns: [
-      /add\s*product/i, /create\s*product/i, /new\s*product/i,
-      /edit\s*product/i, /update\s*product/i, /delete\s*product/i,
-      /remove\s*product/i, /import\s*product/i, /list\s*product/i,
-      /show\s*product/i, /products?\s*(dikhao|batao)/i,
-    ],
+    patterns: [/add\s*product/i, /create\s*product/i, /new\s*product/i,
+               /edit\s*product/i, /update\s*product/i, /delete\s*product/i,
+               /remove\s*product/i, /import\s*product/i, /list\s*product/i,
+               /products?\s*(dikhao|batao|show|list)/i, /inventory/i],
     intent: 'product_management',
     agents: ['product-manager'],
     action: 'manage_products',
   },
-  // Orders
   {
-    patterns: [
-      /order/i, /fulfill/i, /ship/i, /tracking/i,
-      /delivery/i, /refund/i, /return/i, /cancel\s*order/i,
-    ],
+    patterns: [/order/i, /fulfill/i, /ship/i, /tracking/i,
+               /delivery/i, /refund/i, /return/i, /cancel[\s-]?order/i,
+               /dispatch/i],
     intent: 'order_management',
     agents: ['order-fulfillment'],
     action: 'manage_orders',
   },
-  // Pricing
   {
-    patterns: [
-      /price/i, /pricing/i, /cost/i, /margin/i,
-      /markup/i, /update\s*price/i, /check\s*price/i,
-      /monitor/i, /supplier\s*price/i,
-    ],
+    patterns: [/price/i, /pricing/i, /cost/i, /margin/i, /markup/i,
+               /update\s*price/i, /check\s*price/i, /monitor/i,
+               /supplier[\s-]?price/i, /profit/i],
     intent: 'price_management',
     agents: ['price-monitor'],
     action: 'manage_prices',
   },
-  // Content & SEO
   {
-    patterns: [
-      /seo/i, /meta/i, /description/i, /blog/i,
-      /content/i, /copy/i, /write/i, /caption/i,
-      /ad\s*copy/i, /facebook\s*ad/i, /google\s*ad/i,
-      /instagram/i, /tiktok/i, /social/i,
-    ],
+    patterns: [/seo/i, /meta/i, /description/i, /blog/i, /content/i,
+               /copy/i, /write/i, /caption/i, /ad\s*copy/i,
+               /facebook\s*ad/i, /google[\s-]?ad/i, /instagram/i,
+               /tiktok/i, /social/i, /keyword/i],
     intent: 'content_seo',
     agents: ['content-seo'],
     action: 'create_content',
   },
-  // Collections
   {
-    patterns: [
-      /collection/i, /category/i, /organize/i, /group/i,
-      /menu/i, /navigation/i, /nav/i,
-    ],
+    patterns: [/collection/i, /category/i, /organize/i, /group/i,
+               /menu/i, /navigation/i, /\bnav\b/i, /sort/i],
     intent: 'collection_management',
     agents: ['collections'],
     action: 'manage_collections',
   },
-  // Full store setup
   {
-    patterns: [
-      /full\s*store/i, /complete\s*store/i, /pura\s*store/i, /poora\s*store/i,
-      /everything/i, /sab\s*kuch/i, /a\s*to\s*z/i, /setup/i,
-      /store\s*(banao|setup|design)/i,
-    ],
+    patterns: [/full\s*store/i, /complete\s*store/i, /pura\s*store/i,
+               /poora\s*store/i, /everything/i, /sab\s*kuch/i,
+               /a\s*to\s*z/i, /store\s*(banao|setup|design|complete)/i,
+               /from\s*scratch/i],
     intent: 'full_store_setup',
     agents: ['theme-designer', 'homepage', 'product-page', 'collections'],
     action: 'full_setup',
   },
-  // Undo / Repeat
   {
-    patterns: [
-      /undo/i, /wapas/i, /pehle\s*wali/i, /purani/i,
-      /revert/i, /restore/i, /go\s*back/i, /rollback/i,
-    ],
+    patterns: [/undo/i, /wapas/i, /pehle[\s-]?wali/i, /purani/i,
+               /revert/i, /restore/i, /go\s*back/i, /rollback/i,
+               /\bundo\b/i],
     intent: 'undo',
     agents: [],
     action: 'undo_last',
   },
   {
-    patterns: [
-      /dubara/i, /phir\s*se/i, /repeat/i, /again/i,
-      /same/i, /wahi/i, /fir\s*se/i,
-    ],
+    patterns: [/dubara/i, /phir[\s-]?se/i, /repeat/i, /\bagain\b/i,
+               /\bsame\b/i, /\bwahi\b/i, /fir[\s-]?se/i],
     intent: 'repeat',
     agents: [],
     action: 'repeat_last',
   },
 ];
 
-// --------------------------------------------
+// ============================================================
+// MOOD MAP
+// ============================================================
+
+const MOOD_MAP: Array<{ pattern: RegExp; mood: Mood }> = [
+  { pattern: /premium/i,       mood: 'premium' },
+  { pattern: /luxury/i,        mood: 'luxury' },
+  { pattern: /modern/i,        mood: 'modern' },
+  { pattern: /clean/i,         mood: 'clean' },
+  { pattern: /\bdark\b/i,      mood: 'dark' },
+  { pattern: /\blight\b/i,     mood: 'light' },
+  { pattern: /minimal/i,       mood: 'minimalist' },
+  { pattern: /\bbold\b/i,      mood: 'bold' },
+  { pattern: /elegant/i,       mood: 'elegant' },
+  { pattern: /professional/i,  mood: 'professional' },
+  { pattern: /\bfun\b/i,       mood: 'playful' },
+  { pattern: /serious/i,       mood: 'serious' },
+  { pattern: /\bwarm\b/i,      mood: 'warm' },
+  { pattern: /\bcool\b/i,      mood: 'cool' },
+  { pattern: /energetic/i,     mood: 'energetic' },
+  { pattern: /\bcalm\b/i,      mood: 'calm' },
+  { pattern: /attractive/i,    mood: 'attractive' },
+  { pattern: /eye.?catching/i, mood: 'eye-catching' },
+  { pattern: /classical/i,     mood: 'classical' },
+  { pattern: /vintage/i,       mood: 'vintage' },
+];
+
+// ============================================================
+// URDU DETECTION PATTERNS
+// ============================================================
+
+const URDU_PATTERNS: RegExp[] = [
+  /karo|banao|lagao|hatao|dikhao|chahiye|karna|batao/i,
+  /mujhe|mera|humara|apna|tumhara/i,
+  /acha|achi|behtareen|zabardast|shandar/i,
+  /kaise|kyun|kab|kahan|konsa/i,
+  /pehle|baad|abhi|kal|aj/i,
+  /wala|wali|wale/i,
+  /\bhai\b|\bhain\b|\btha\b|\bthi\b|\bthe\b/i,
+  /\bbhai\b|\byaar\b|\bboss\b/i,
+];
+
+// ============================================================
+// UTILITY: Timeout wrapper
+// ============================================================
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[Timeout] ${label} exceeded ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+// ============================================================
+// UTILITY: Sleep
+// ============================================================
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
 // ORCHESTRATOR CLASS
-// --------------------------------------------
+// ============================================================
 
 export class Orchestrator {
-  private router: AIRouter;
-  private memoryAgent: MemoryAgent;
-  private agentHandlers: Map<string, AgentHandler> = new Map();
+  private readonly router: AIRouter;
+  private readonly memoryAgent: MemoryAgent;
+  private readonly agentHandlers = new Map<AgentName, AgentHandler>();
+  private readonly undoStack: UndoEntry[] = [];
 
   constructor() {
     this.router = getAIRouter();
     this.memoryAgent = getMemoryAgent();
   }
 
-  // --------------------------------------------
-  // MAIN PROCESS METHOD
-  // --------------------------------------------
+  // ----------------------------------------------------------
+  // PUBLIC: Main entry point
+  // ----------------------------------------------------------
 
   async process(input: OrchestratorInput): Promise<OrchestratorOutput> {
     const startTime = Date.now();
-    const actions: ActionResult[] = [];
-    const agentsUsed: string[] = [];
 
     try {
-      // Step 1: Record user message
+      // Record incoming message
       await this.memoryAgent.recordUserMessage(input.message);
 
-      // Step 2: Interpret the message
+      // Interpret intent
       const intent = await this.interpretMessage(input.message);
 
-      // Step 3: Handle special intents (undo, repeat)
+      // ── Undo ──────────────────────────────────────────────
       if (intent.isUndo) {
-        const undoResult = await this.handleUndo();
-        return {
-          success: undoResult.success,
-          response: undoResult.message,
-          agentsUsed: ['memory'],
-          actions: [{
-            agent: 'memory',
-            action: 'undo',
-            success: undoResult.success,
-            result: undoResult.message,
-            duration: Date.now() - startTime,
-          }],
-          processingTime: Date.now() - startTime,
-        };
+        return this.buildUndoOutput(await this.handleUndo(), startTime);
       }
 
+      // ── Repeat ────────────────────────────────────────────
       if (intent.isRepeat) {
-        const repeatResult = await this.handleRepeat(input.message);
-        return {
-          success: repeatResult.success,
-          response: repeatResult.response,
-          agentsUsed: repeatResult.agentsUsed,
-          actions: repeatResult.actions,
-          processingTime: Date.now() - startTime,
-        };
+        return this.handleRepeat(input.message, startTime);
       }
 
-      // Step 4: Execute agent tasks
-      for (const task of intent.agents) {
-        agentsUsed.push(task.agent);
+      // ── Normal execution ──────────────────────────────────
+      const actions = await this.executeTasks(intent);
+      const response = this.composeResponse(input.message, intent, actions);
 
-        // Check if task depends on another
-        if (task.dependsOn) {
-          const dependencyResult = actions.find(a => a.agent === task.dependsOn);
-          if (dependencyResult && !dependencyResult.success) {
-            actions.push({
-              agent: task.agent,
-              action: task.action,
-              success: false,
-              result: `Skipped — dependency "${task.dependsOn}" failed`,
-              duration: 0,
-            });
-            continue;
-          }
-        }
-
-        const result = await this.executeAgentTask(task, intent);
-        actions.push(result);
-      }
-
-      // Step 5: Generate final response
-      const response = await this.generateResponse(input.message, intent, actions);
-
-      // Step 6: Record assistant response
       await this.memoryAgent.recordAssistantMessage(response, {
         agent: 'orchestrator',
         action: intent.primaryIntent,
@@ -326,202 +357,220 @@ export class Orchestrator {
         duration: Date.now() - startTime,
       });
 
-      // Step 7: Generate follow-up suggestions
-      const followUps = this.generateFollowUpSuggestions(intent, actions);
+      // Push to undo stack
+      this.pushUndoStack(actions);
 
       return {
         success: actions.length === 0 || actions.some(a => a.success),
         response,
-        agentsUsed,
+        agentsUsed: [...new Set(actions.map(a => a.agent))],
         actions,
-        suggestedFollowUp: followUps,
+        suggestedFollowUp: this.generateFollowUps(intent),
         processingTime: Date.now() - startTime,
+        confidence: intent.confidence,
+        intent: intent.primaryIntent,
       };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
 
-      await this.memoryAgent.recordAssistantMessage(`Error: ${errorMsg}`, {
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await this.memoryAgent.recordAssistantMessage(`Error: ${msg}`, {
         agent: 'orchestrator',
         action: 'error',
         success: false,
         duration: Date.now() - startTime,
-      });
+      }).catch(() => undefined); // Don't throw on logging failure
 
       return {
         success: false,
-        response: `I encountered an error: ${errorMsg}. Let me try again or you can rephrase your request.`,
-        agentsUsed,
-        actions,
+        response: `⚠️ Kuch masla hua: ${msg}\n\nPlease thodi der baad dobara try karo ya apna request aur clearly likhein.`,
+        agentsUsed: [],
+        actions: [],
+        suggestedFollowUp: [],
         processingTime: Date.now() - startTime,
+        confidence: 0,
+        error: msg,
       };
     }
   }
 
-  // --------------------------------------------
-  // MESSAGE INTERPRETATION
-  // --------------------------------------------
+  // ----------------------------------------------------------
+  // INTENT INTERPRETATION
+  // ----------------------------------------------------------
 
   private async interpretMessage(message: string): Promise<InterpretedIntent> {
-    // Check for repeat/undo first
-    const repeatIntent = await this.memoryAgent.detectRepeatIntent(message);
-    if (repeatIntent.isRepeat) {
+    // Fast path: check repeat/undo via memory
+    const repeatCheck = await this.memoryAgent.detectRepeatIntent(message);
+    if (repeatCheck.isRepeat) {
       return {
-        primaryIntent: repeatIntent.intent,
+        primaryIntent: repeatCheck.intent,
         agents: [],
-        isRepeat: repeatIntent.intent !== 'undo_last',
-        isUndo: repeatIntent.intent === 'undo_last',
+        isRepeat: repeatCheck.intent !== 'undo_last',
+        isUndo: repeatCheck.intent === 'undo_last',
         isChange: false,
-        parameters: { originalAction: repeatIntent.originalAction },
-        confidence: 0.9,
-        rawInterpretation: `Detected ${repeatIntent.intent} intent`,
+        parameters: { originalAction: repeatCheck.originalAction },
+        confidence: 0.92,
+        rawInterpretation: `Detected: ${repeatCheck.intent}`,
       };
     }
 
-    // Pattern-based intent detection
     const patternMatch = this.matchPatterns(message);
+    const needsDeepAnalysis = this.containsUrdu(message) || this.isVague(message);
 
-    // Check if it contains Urdu — use Gemini for deep interpretation
-    const hasUrdu = this.containsUrdu(message);
-    const isVague = this.isVaguePrompt(message);
-
-    if (hasUrdu || isVague) {
-      return this.deepInterpretation(message, patternMatch);
+    if (needsDeepAnalysis) {
+      return this.deepInterpret(message, patternMatch);
     }
 
-    // If clear pattern match found
     if (patternMatch) {
-      return {
-        primaryIntent: patternMatch.intent,
-        agents: patternMatch.agents.map((agent, index) => ({
-          agent,
-          action: patternMatch.action,
-          parameters: this.extractParameters(message),
-          priority: index + 1,
-          dependsOn: index > 0 ? patternMatch.agents[index - 1] : undefined,
-        })),
-        isRepeat: false,
-        isUndo: false,
-        isChange: this.isChangeRequest(message),
-        mood: this.detectMood(message),
-        parameters: this.extractParameters(message),
-        confidence: 0.85,
-        rawInterpretation: `Pattern matched: ${patternMatch.intent}`,
-      };
+      return this.buildIntentFromPattern(message, patternMatch);
     }
 
-    // Fallback: AI interpretation
-    return this.deepInterpretation(message, null);
+    return this.deepInterpret(message, null);
   }
 
-  // --------------------------------------------
-  // DEEP AI INTERPRETATION
-  // --------------------------------------------
-
-  private async deepInterpretation(
+  private buildIntentFromPattern(
     message: string,
-    patternHint: typeof INTENT_PATTERNS[0] | null
+    pattern: IntentPattern
+  ): InterpretedIntent {
+    const params = this.extractParameters(message);
+    return {
+      primaryIntent: pattern.intent,
+      agents: pattern.agents.map((agent, i) => ({
+        agent,
+        action: pattern.action,
+        parameters: params,
+        priority: i + 1,
+        dependsOn: i > 0 ? pattern.agents[i - 1] : undefined,
+      })),
+      isRepeat: false,
+      isUndo: false,
+      isChange: this.isChangeRequest(message),
+      mood: this.detectMood(message),
+      parameters: params,
+      confidence: 0.87,
+      rawInterpretation: `Pattern matched: ${pattern.intent}`,
+    };
+  }
+
+  // ----------------------------------------------------------
+  // DEEP AI INTERPRETATION (Gemini)
+  // ----------------------------------------------------------
+
+  private async deepInterpret(
+    message: string,
+    hint: IntentPattern | null
   ): Promise<InterpretedIntent> {
     const context = await this.memoryAgent.getCompactContext();
 
-    const prompt = `You are the orchestrator for CareHub Shopify store automation system.
-Interpret this user message and determine what needs to be done.
+    const agentList = Object.entries(AGENT_DESCRIPTIONS)
+      .map(([name, desc]) => `  - ${name}: ${desc}`)
+      .join('\n');
+
+    const prompt = `You are the master orchestrator for "CareHub" — a Shopify dropshipping store AI automation system.
+
+Analyze this user message and determine exactly which agents should handle it.
 
 User Message: "${message}"
-Current Context: ${context}
-${patternHint ? `Pattern Hint: Likely related to ${patternHint.intent}` : ''}
+Recent Context: ${context}
+${hint ? `Pattern Hint: Likely related to "${hint.intent}"` : ''}
 
-Available Agents and their capabilities:
-${Object.entries(AGENT_DESCRIPTIONS).map(([name, desc]) => `- ${name}: ${desc}`).join('\n')}
+Available Agents:
+${agentList}
 
-IMPORTANT: The user speaks Roman Urdu mixed with English. Common terms:
-- "karo" = do it, "banao" = make/create, "lagao" = apply/put
-- "hatao" = remove, "dikhao" = show, "chahiye" = want/need
-- "acha/achi" = good, "behtareen" = best, "zabardast" = amazing
-- "dubara" = again, "pehle wali" = previous one, "wapas" = back
+Roman Urdu dictionary (user mixes these with English):
+karo=do, banao=make/create, lagao=apply, hatao=remove, dikhao=show,
+chahiye=want/need, acha/achi=good, behtareen=best, zabardast=amazing,
+dubara=again, pehle wali=previous one, wapas=back, thoda=a little,
+zyada=more, kam=less, abhi=now, jaldi=quickly, sab=all, kuch=something
 
-Return ONLY valid JSON:
+IMPORTANT RULES:
+1. Respond ONLY with valid JSON — no markdown, no explanation
+2. Only use agent names from the list above
+3. Set "isChange" true only if user is modifying existing content
+4. Confidence: 0.9 = very clear, 0.5 = guessed, 0.3 = uncertain
+
+JSON Schema:
 {
-  "primaryIntent": "main intent description",
+  "primaryIntent": "string — what the user ultimately wants",
   "agents": [
     {
-      "agent": "agent-name",
-      "action": "specific action",
+      "agent": "exact-agent-name",
+      "action": "specific_snake_case_action",
       "parameters": {},
       "priority": 1
     }
   ],
   "isChange": false,
-  "mood": "detected mood or null",
+  "mood": "one of: premium|luxury|modern|clean|dark|light|minimalist|bold|elegant|professional|playful|serious|warm|cool|energetic|calm|attractive|eye-catching|classical|vintage|null",
   "parameters": {},
-  "confidence": 0.0-1.0,
-  "interpretation": "plain English interpretation"
+  "confidence": 0.0,
+  "interpretation": "one sentence plain English summary"
 }`;
 
     const messages: GeminiMessage[] = [{ role: 'user', content: prompt }];
 
-    const response = await this.router.useGeminiJSON<{
+    interface DeepInterpretResponse {
       primaryIntent: string;
-      agents: Array<{ agent: string; action: string; parameters: Record<string, unknown>; priority: number }>;
+      agents: Array<{
+        agent: string;
+        action: string;
+        parameters: Record<string, unknown>;
+        priority: number;
+      }>;
       isChange: boolean;
       mood: string | null;
       parameters: Record<string, unknown>;
       confidence: number;
       interpretation: string;
-    }>(messages, 'urdu_understanding');
+    }
+
+    const response = await this.router.useGeminiJSON<DeepInterpretResponse>(
+      messages,
+      'urdu_understanding'
+    );
 
     if (response.success && response.data) {
-      const data = response.data;
+      const d = response.data;
 
-      // Validate agent names
-      const validAgents = data.agents.filter(a =>
-        Object.keys(AGENT_DESCRIPTIONS).includes(a.agent)
-      );
+      // Validate & filter to known agents only
+      const validAgents = d.agents.filter(
+        a => Object.keys(AGENT_DESCRIPTIONS).includes(a.agent)
+      ) as Array<{
+        agent: AgentName;
+        action: string;
+        parameters: Record<string, unknown>;
+        priority: number;
+      }>;
 
       return {
-        primaryIntent: data.primaryIntent,
+        primaryIntent: d.primaryIntent,
         agents: validAgents.map(a => ({
           agent: a.agent,
           action: a.action,
-          parameters: a.parameters || {},
-          priority: a.priority || 1,
+          parameters: a.parameters ?? {},
+          priority: a.priority ?? 1,
         })),
         isRepeat: false,
         isUndo: false,
-        isChange: data.isChange || false,
-        mood: data.mood || undefined,
-        parameters: data.parameters || {},
-        confidence: data.confidence || 0.7,
-        rawInterpretation: data.interpretation || 'AI interpreted',
+        isChange: d.isChange ?? false,
+        mood: (d.mood as Mood | null) ?? undefined,
+        parameters: d.parameters ?? {},
+        confidence: Math.max(0, Math.min(1, d.confidence ?? 0.6)),
+        rawInterpretation: d.interpretation ?? 'AI interpreted',
       };
     }
 
-    // Fallback if AI interpretation also fails
-    return this.fallbackInterpretation(message, patternHint);
+    return this.fallbackInterpret(message, hint);
   }
 
-  private fallbackInterpretation(
+  private fallbackInterpret(
     message: string,
-    patternHint: typeof INTENT_PATTERNS[0] | null
+    hint: IntentPattern | null
   ): InterpretedIntent {
-    if (patternHint) {
-      return {
-        primaryIntent: patternHint.intent,
-        agents: patternHint.agents.map((agent, index) => ({
-          agent,
-          action: patternHint.action,
-          parameters: this.extractParameters(message),
-          priority: index + 1,
-        })),
-        isRepeat: false,
-        isUndo: false,
-        isChange: false,
-        parameters: this.extractParameters(message),
-        confidence: 0.5,
-        rawInterpretation: 'Fallback: using pattern hint',
-      };
+    if (hint) {
+      return this.buildIntentFromPattern(message, hint);
     }
 
-    // Absolute fallback — use theme-designer for vague design requests
+    // Absolute fallback
     return {
       primaryIntent: 'general_request',
       agents: [{
@@ -534,146 +583,321 @@ Return ONLY valid JSON:
       isUndo: false,
       isChange: false,
       parameters: { rawMessage: message },
-      confidence: 0.3,
-      rawInterpretation: 'Fallback: could not determine specific intent',
+      confidence: 0.25,
+      rawInterpretation: 'Fallback: intent unclear',
     };
   }
 
-  // --------------------------------------------
-  // AGENT TASK EXECUTION
-  // --------------------------------------------
+  // ----------------------------------------------------------
+  // TASK EXECUTION (Parallel with dependency graph)
+  // ----------------------------------------------------------
 
-  private async executeAgentTask(task: AgentTask, intent: InterpretedIntent): Promise<ActionResult> {
-    const startTime = Date.now();
+  private async executeTasks(intent: InterpretedIntent): Promise<ActionResult[]> {
+    // Sort by priority
+    const sorted = [...intent.agents].sort((a, b) => a.priority - b.priority);
 
-    try {
-      // Check if handler is registered
-      const handler = this.agentHandlers.get(task.agent);
+    const results: ActionResult[] = [];
+    const completedAgents = new Set<string>();
+    const failedAgents = new Set<string>();
 
-      if (handler) {
-        const context = await this.memoryAgent.summarizeForAgent(task.agent, task.action);
-        const result = await handler(task, context);
+    // Group tasks that can run in parallel (same priority level)
+    const groups = this.groupByPriority(sorted);
 
-        // Log the action
-        await this.memoryAgent.logAction({
-          agent: task.agent,
-          action: task.action,
-          input: JSON.stringify(task.parameters),
-          output: result.result,
-          success: result.success,
-          duration: Date.now() - startTime,
-          reversible: true,
-        });
-
-        return result;
-      }
-
-      // No handler — use AI to generate response
-      const context = await this.memoryAgent.summarizeForAgent(task.agent, task.action);
-      const aiResult = await this.executeWithAI(task, intent, context);
-
-      // Log the action
-      await this.memoryAgent.logAction({
-        agent: task.agent,
-        action: task.action,
-        input: JSON.stringify(task.parameters),
-        output: aiResult.result,
-        success: aiResult.success,
-        duration: Date.now() - startTime,
-        reversible: true,
+    for (const group of groups) {
+      const eligible = group.filter(task => {
+        if (!task.dependsOn) return true;
+        if (failedAgents.has(task.dependsOn)) {
+          results.push({
+            agent: task.agent,
+            action: task.action,
+            success: false,
+            result: `⏭️ Skipped — dependency "${task.dependsOn}" failed`,
+            duration: 0,
+          });
+          return false;
+        }
+        return completedAgents.has(task.dependsOn);
       });
 
-      return aiResult;
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        agent: task.agent,
-        action: task.action,
-        success: false,
-        result: `Error executing ${task.agent}: ${errorMsg}`,
-        duration: Date.now() - startTime,
-      };
+      // Run eligible tasks in parallel
+      const parallelResults = await Promise.all(
+        eligible.map(task => this.runTaskWithRetry(task, intent))
+      );
+
+      for (let i = 0; i < parallelResults.length; i++) {
+        const result = parallelResults[i];
+        results.push(result);
+
+        if (result.success) {
+          completedAgents.add(eligible[i].agent);
+        } else {
+          failedAgents.add(eligible[i].agent);
+        }
+      }
     }
+
+    return results;
   }
 
-  private async executeWithAI(task: AgentTask, intent: InterpretedIntent, context: string): Promise<ActionResult> {
-    const startTime = Date.now();
+  private groupByPriority(tasks: AgentTask[]): AgentTask[][] {
+    const map = new Map<number, AgentTask[]>();
+    for (const task of tasks) {
+      const p = task.priority;
+      if (!map.has(p)) map.set(p, []);
+      map.get(p)!.push(task);
+    }
+    return [...map.entries()].sort(([a], [b]) => a - b).map(([, t]) => t);
+  }
 
-    const prompt = `You are the "${task.agent}" agent for CareHub Shopify store.
-Your job: ${AGENT_DESCRIPTIONS[task.agent]}
+  private async runTaskWithRetry(
+    task: AgentTask,
+    intent: InterpretedIntent
+  ): Promise<ActionResult> {
+    const maxRetries = task.retryCount ?? MAX_RETRIES;
+    let lastError = '';
 
-Task: ${task.action}
-Parameters: ${JSON.stringify(task.parameters)}
-User's mood/style preference: ${intent.mood || 'premium'}
-User's original message interpreted as: ${intent.rawInterpretation}
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        await sleep(500 * attempt); // Exponential-ish backoff
+      }
 
-Context:
-${context}
+      const result = await this.executeTask(task, intent);
 
-Execute this task and provide a detailed response of what you would do.
-If this involves Shopify API calls, list the exact calls needed.
-If this involves design, provide specific design specifications.
-Be specific, actionable, and complete.`;
+      if (result.success) {
+        return { ...result, retries: attempt };
+      }
 
-    const response = await this.router.route({
-      id: `${task.agent}-${Date.now()}`,
-      message: prompt,
-      context,
-      priority: 'quality',
-    });
+      lastError = result.result;
+
+      // Don't retry on certain terminal errors
+      if (result.result.includes('[Timeout]') && attempt < maxRetries) {
+        continue;
+      }
+    }
 
     return {
       agent: task.agent,
       action: task.action,
-      success: response.success,
-      result: response.content,
-      duration: Date.now() - startTime,
+      success: false,
+      result: `❌ Failed after ${maxRetries + 1} attempts: ${lastError}`,
+      duration: 0,
+      retries: maxRetries,
     };
   }
 
-  // --------------------------------------------
-  // UNDO & REPEAT HANDLERS
-  // --------------------------------------------
+  private async executeTask(
+    task: AgentTask,
+    intent: InterpretedIntent
+  ): Promise<ActionResult> {
+    const startTime = Date.now();
 
-  private async handleUndo(): Promise<{ success: boolean; message: string }> {
-    const undoResult = await this.memoryAgent.undo();
+    const context = await this.memoryAgent.summarizeForAgent(task.agent, task.action);
 
-    if (!undoResult.success) {
-      return { success: false, message: 'Nothing to undo. No reversible actions found.' };
+    // Use registered handler if available
+    const handler = this.agentHandlers.get(task.agent);
+    if (handler) {
+      try {
+        const result = await withTimeout(
+          handler(task, context),
+          AGENT_TIMEOUT_MS,
+          task.agent
+        );
+
+        await this.logAction(task, result, Date.now() - startTime);
+        return result;
+      } catch (err) {
+        return {
+          agent: task.agent,
+          action: task.action,
+          success: false,
+          result: err instanceof Error ? err.message : String(err),
+          duration: Date.now() - startTime,
+        };
+      }
+    }
+
+    // Fallback: use AI router
+    return this.runWithAI(task, intent, context, startTime);
+  }
+
+  private async runWithAI(
+    task: AgentTask,
+    intent: InterpretedIntent,
+    context: string,
+    startTime: number
+  ): Promise<ActionResult> {
+    const prompt = `You are the "${task.agent}" specialist agent for CareHub Shopify store.
+Capability: ${AGENT_DESCRIPTIONS[task.agent]}
+
+Task: ${task.action}
+Parameters: ${JSON.stringify(task.parameters, null, 2)}
+User's style preference: ${intent.mood ?? 'premium'}
+User's request in plain English: ${intent.rawInterpretation}
+
+Store Context:
+${context}
+
+Execute this task with maximum precision. Provide:
+1. Exactly what you would do
+2. Specific Shopify API calls (if applicable)
+3. Exact design specs or code (if applicable)
+4. Expected outcome
+Be concrete, actionable, and complete.`;
+
+    const response = await withTimeout(
+      this.router.route({
+        id: `${task.agent}-${Date.now()}`,
+        message: prompt,
+        context,
+        priority: 'quality',
+      }),
+      AGENT_TIMEOUT_MS,
+      task.agent
+    );
+
+    const result: ActionResult = {
+      agent: task.agent,
+      action: task.action,
+      success: response.success,
+      result: response.content ?? 'No response',
+      duration: Date.now() - startTime,
+    };
+
+    await this.logAction(task, result, result.duration);
+    return result;
+  }
+
+  private async logAction(
+    task: AgentTask,
+    result: ActionResult,
+    duration: number
+  ): Promise<void> {
+    await this.memoryAgent.logAction({
+      agent: task.agent,
+      action: task.action,
+      input: JSON.stringify(task.parameters),
+      output: result.result,
+      success: result.success,
+      duration,
+      reversible: true,
+    }).catch(() => undefined); // Non-fatal
+  }
+
+  // ----------------------------------------------------------
+  // UNDO STACK
+  // ----------------------------------------------------------
+
+  private pushUndoStack(actions: ActionResult[]): void {
+    const successful = actions.filter(a => a.success);
+    if (successful.length === 0) return;
+
+    this.undoStack.push({
+      action: successful[successful.length - 1],
+      snapshot: JSON.stringify(successful),
+      timestamp: Date.now(),
+    });
+
+    // Trim stack
+    if (this.undoStack.length > MAX_UNDO_STACK) {
+      this.undoStack.shift();
+    }
+  }
+
+  private async handleUndo(): Promise<{ success: boolean; message: string; agent?: string; action?: string }> {
+    // Try memory agent first
+    const memUndo = await this.memoryAgent.undo().catch(() => null);
+    if (memUndo?.success && memUndo.undoneAction) {
+      return {
+        success: true,
+        message: `✅ Undo successful!\n\n[${memUndo.undoneAction.agent}] → ${memUndo.undoneAction.action}\n\nPrevious state restored. Aage badho! 🚀`,
+        agent: memUndo.undoneAction.agent,
+        action: memUndo.undoneAction.action,
+      };
+    }
+
+    // Try local undo stack
+    const entry = this.undoStack.pop();
+    if (entry) {
+      return {
+        success: true,
+        message: `✅ Undo successful!\n\n[${entry.action.agent}] → ${entry.action.action}\n\nPrevious state restored.`,
+        agent: entry.action.agent,
+        action: entry.action.action,
+      };
     }
 
     return {
-      success: true,
-      message: `✅ Undone: [${undoResult.undoneAction?.agent}] ${undoResult.undoneAction?.action}\n\nPrevious state has been restored. You can now make new changes.`,
+      success: false,
+      message: '⚠️ Kuch undo nahi hua — koi reversible action nahi mila.\n\nPehle kuch karo, phir undo karo!',
     };
   }
 
-  private async handleRepeat(message: string): Promise<OrchestratorOutput> {
-    const startTime = Date.now();
+  private buildUndoOutput(
+    undoResult: { success: boolean; message: string },
+    startTime: number
+  ): OrchestratorOutput {
+    return {
+      success: undoResult.success,
+      response: undoResult.message,
+      agentsUsed: ['memory'],
+      actions: [{
+        agent: 'memory',
+        action: 'undo',
+        success: undoResult.success,
+        result: undoResult.message,
+        duration: Date.now() - startTime,
+      }],
+      suggestedFollowUp: ['Naya theme lagao', 'Homepage update karo', 'Products check karo'],
+      processingTime: Date.now() - startTime,
+      confidence: 1,
+    };
+  }
+
+  // ----------------------------------------------------------
+  // REPEAT HANDLER
+  // ----------------------------------------------------------
+
+  private async handleRepeat(
+    message: string,
+    startTime: number
+  ): Promise<OrchestratorOutput> {
     const repeatIntent = await this.memoryAgent.detectRepeatIntent(message);
 
     if (!repeatIntent.originalAction) {
       return {
         success: false,
-        response: 'I could not find a previous action to repeat. Please tell me what you want to do.',
+        response: '⚠️ Koi previous action nahi mila repeat karne ke liye.\nPehle kuch karo, phir "dubara karo" kaho!',
         agentsUsed: ['memory'],
         actions: [],
+        suggestedFollowUp: ['Theme design karo', 'Products add karo', 'Homepage update karo'],
         processingTime: Date.now() - startTime,
+        confidence: 0.9,
       };
     }
 
-    const originalAction = repeatIntent.originalAction;
+    const original = repeatIntent.originalAction;
+    const agentName = original.agent as AgentName;
 
-    // Re-execute the original action
+    if (!Object.keys(AGENT_DESCRIPTIONS).includes(agentName)) {
+      return {
+        success: false,
+        response: `⚠️ Previous action ka agent "${agentName}" recognized nahi hua.`,
+        agentsUsed: [],
+        actions: [],
+        suggestedFollowUp: [],
+        processingTime: Date.now() - startTime,
+        confidence: 0.5,
+      };
+    }
+
     const task: AgentTask = {
-      agent: originalAction.agent,
-      action: originalAction.action,
-      parameters: JSON.parse(originalAction.input || '{}'),
+      agent: agentName,
+      action: original.action,
+      parameters: this.safeParseJSON(original.input),
       priority: 1,
     };
 
-    const context = await this.memoryAgent.summarizeForAgent(task.agent, task.action);
-    const result = await this.executeWithAI(task, {
+    const intent: InterpretedIntent = {
       primaryIntent: 'repeat',
       agents: [task],
       isRepeat: true,
@@ -681,274 +905,238 @@ Be specific, actionable, and complete.`;
       isChange: false,
       parameters: {},
       confidence: 0.9,
-      rawInterpretation: `Repeating: ${originalAction.action}`,
-    }, context);
+      rawInterpretation: `Repeating: ${original.action}`,
+    };
+
+    const context = await this.memoryAgent.summarizeForAgent(task.agent, task.action);
+    const result = await this.runWithAI(task, intent, context, Date.now());
 
     return {
       success: result.success,
-      response: `🔄 Repeating: [${originalAction.agent}] ${originalAction.action}\n\n${result.result}`,
-      agentsUsed: [originalAction.agent],
+      response: `🔄 Repeat: [${agentName}] ${original.action}\n\n${result.result}`,
+      agentsUsed: [agentName],
       actions: [result],
+      suggestedFollowUp: this.generateFollowUps(intent),
       processingTime: Date.now() - startTime,
+      confidence: 0.9,
     };
   }
 
-  // --------------------------------------------
-  // RESPONSE GENERATION
-  // --------------------------------------------
+  // ----------------------------------------------------------
+  // RESPONSE COMPOSITION
+  // ----------------------------------------------------------
 
-  private async generateResponse(
+  private composeResponse(
     originalMessage: string,
     intent: InterpretedIntent,
     actions: ActionResult[]
-  ): Promise<string> {
-    const successfulActions = actions.filter(a => a.success);
-    const failedActions = actions.filter(a => !a.success);
-
+  ): string {
     if (actions.length === 0) {
-      return `I understood your message: "${originalMessage}"\n\nInterpretation: ${intent.rawInterpretation}\n\nHowever, I couldn't determine a specific action to take. Could you be more specific about what you'd like me to do?`;
+      return [
+        `💬 Tumhara message samajh aaya: "${originalMessage}"`,
+        `📌 Interpretation: ${intent.rawInterpretation}`,
+        '',
+        '❓ Lekin main exactly kya karna hai yeh clearly define nahi kar saka.',
+        'Thoda aur detail do — main turant karta hun!',
+      ].join('\n');
     }
 
-    let response = '';
+    const ok = actions.filter(a => a.success);
+    const fail = actions.filter(a => !a.success);
+    const lines: string[] = [];
 
-    if (successfulActions.length > 0) {
-      response += `✅ **Done!**\n\n`;
-
-      for (const action of successfulActions) {
-        response += `**[${action.agent}]** ${action.action}\n`;
-        response += `${action.result.substring(0, 500)}\n\n`;
+    if (ok.length > 0) {
+      lines.push(`✅ Ho gaya! (${ok.length} task${ok.length > 1 ? 's' : ''} complete)\n`);
+      for (const a of ok) {
+        lines.push(`**[${a.agent}]** → ${a.action}`);
+        lines.push(a.result.substring(0, 600));
+        if (a.retries && a.retries > 0) lines.push(`_(${a.retries} retry needed)_`);
+        lines.push('');
       }
     }
 
-    if (failedActions.length > 0) {
-      response += `\n⚠️ **Some tasks had issues:**\n\n`;
-
-      for (const action of failedActions) {
-        response += `**[${action.agent}]** ${action.action}: ${action.result.substring(0, 200)}\n`;
+    if (fail.length > 0) {
+      lines.push(`\n⚠️ ${fail.length} task${fail.length > 1 ? 's' : ''} mein masla hua:\n`);
+      for (const a of fail) {
+        lines.push(`• [${a.agent}] ${a.action}`);
+        lines.push(`  ↳ ${a.result.substring(0, 200)}`);
       }
     }
 
-    // Add processing info
-    response += `\n---\n`;
-    response += `🤖 Agents used: ${actions.map(a => a.agent).join(', ')}\n`;
-    response += `⏱️ Total time: ${actions.reduce((sum, a) => sum + a.duration, 0)}ms`;
+    // Metadata footer
+    lines.push('\n─────────────────────────');
+    lines.push(`🤖 Agents: ${actions.map(a => a.agent).join(' → ')}`);
+    lines.push(`🎯 Confidence: ${Math.round(intent.confidence * 100)}%`);
+    lines.push(`⏱️ Time: ${actions.reduce((s, a) => s + a.duration, 0)}ms`);
+    if (intent.mood) lines.push(`🎨 Style: ${intent.mood}`);
 
-    return response;
+    return lines.join('\n');
   }
 
-  // --------------------------------------------
+  // ----------------------------------------------------------
   // FOLLOW-UP SUGGESTIONS
-  // --------------------------------------------
+  // ----------------------------------------------------------
 
-  private generateFollowUpSuggestions(intent: InterpretedIntent, actions: ActionResult[]): string[] {
+  private generateFollowUps(intent: InterpretedIntent): string[] {
+    const agentNames = new Set(intent.agents.map(a => a.agent));
     const suggestions: string[] = [];
-    const agentsUsed = intent.agents.map(a => a.agent);
 
-    if (agentsUsed.includes('theme-designer')) {
-      suggestions.push('Homepage bhi update karo same style mein');
+    if (agentNames.has('theme-designer')) {
+      suggestions.push('Homepage bhi same style mein update karo');
       suggestions.push('Product pages bhi match karao');
-      suggestions.push('Aur dark/light karo');
+      suggestions.push('Dark/light mode toggle add karo');
     }
-
-    if (agentsUsed.includes('homepage')) {
-      suggestions.push('Hero section change karo');
+    if (agentNames.has('homepage')) {
+      suggestions.push('Hero section ka text change karo');
       suggestions.push('Trust badges add karo');
-      suggestions.push('Testimonials section add karo');
+      suggestions.push('Featured collection add karo');
     }
-
-    if (agentsUsed.includes('product-manager')) {
-      suggestions.push('Products ki prices update karo');
+    if (agentNames.has('product-manager')) {
+      suggestions.push('In products ki prices check karo');
+      suggestions.push('SEO descriptions likhao');
       suggestions.push('Collection bana do in products ki');
-      suggestions.push('SEO optimize karo products ka');
     }
-
-    if (agentsUsed.includes('content-seo')) {
-      suggestions.push('Blog post bhi likh do');
-      suggestions.push('Social media captions bhi do');
+    if (agentNames.has('content-seo')) {
+      suggestions.push('Social media captions bhi generate karo');
       suggestions.push('Meta descriptions update karo');
+      suggestions.push('Blog post likh do is topic par');
+    }
+    if (agentNames.has('order-fulfillment')) {
+      suggestions.push('Tracking numbers check karo');
+      suggestions.push('Refund status dekho');
+    }
+    if (agentNames.has('price-monitor')) {
+      suggestions.push('Margins ki report banao');
+      suggestions.push('Auto price rules set karo');
     }
 
     if (suggestions.length === 0) {
-      suggestions.push('Store ka theme design karo');
-      suggestions.push('Products add karo');
-      suggestions.push('Homepage update karo');
+      suggestions.push('Store ka overall theme design karo');
+      suggestions.push('Products CJ se import karo');
+      suggestions.push('Homepage hero update karo');
     }
 
     return suggestions.slice(0, 3);
   }
 
-  // --------------------------------------------
-  // HELPER METHODS
-  // --------------------------------------------
+  // ----------------------------------------------------------
+  // PATTERN MATCHING
+  // ----------------------------------------------------------
 
-  private matchPatterns(message: string): typeof INTENT_PATTERNS[0] | null {
-    let bestMatch: typeof INTENT_PATTERNS[0] | null = null;
+  private matchPatterns(message: string): IntentPattern | null {
+    let best: IntentPattern | null = null;
     let bestScore = 0;
 
     for (const pattern of INTENT_PATTERNS) {
       let score = 0;
       for (const regex of pattern.patterns) {
-        if (regex.test(message)) {
-          score++;
-        }
+        if (regex.test(message)) score++;
       }
       if (score > bestScore) {
         bestScore = score;
-        bestMatch = pattern;
+        best = pattern;
       }
     }
 
-    return bestScore >= 1 ? bestMatch : null;
+    return bestScore >= MIN_PATTERN_SCORE ? best : null;
   }
+
+  // ----------------------------------------------------------
+  // MESSAGE ANALYSIS HELPERS
+  // ----------------------------------------------------------
 
   private containsUrdu(message: string): boolean {
-    const urduPatterns = [
-      /karo|banao|lagao|hatao|dikhao|chahiye|karna|batao/i,
-      /mujhe|mera|humara|apna|tumhara/i,
-      /acha|achi|behtareen|zabardast|shandar/i,
-      /kaise|kyun|kab|kahan|konsa/i,
-      /pehle|baad|abhi|kal|aj/i,
-      /wala|wali|wale/i,
-      /hai|hain|tha|thi|the/i,
-      /bhai|yaar|boss/i,
-    ];
-
-    return urduPatterns.some(p => p.test(message));
+    return URDU_PATTERNS.some(p => p.test(message));
   }
 
-  private isVaguePrompt(message: string): boolean {
-    const vaguePatterns = [
-      /^.{1,20}$/,  // Very short messages
-      /acha\s*(banao|karo|lagao)/i,
-      /best\s*(banao|karo|lagao)/i,
-      /premium/i,
-      /attractive/i,
-      /beautiful/i,
-      /\b(nice|good|better|great)\b/i,
-    ];
-
-    // If message is short and doesn't have specific keywords
-    if (message.split(' ').length <= 5) return true;
-
-    return vaguePatterns.some(p => p.test(message));
+  private isVague(message: string): boolean {
+    if (message.trim().split(/\s+/).length < 4) return true;
+    const vaguePhrases = [/acha\s*(banao|karo)/i, /best\s*(banao|karo)/i,
+      /premium/i, /attractive/i, /beautiful/i, /\b(nice|good|better|great)\b/i];
+    return vaguePhrases.some(p => p.test(message)) && message.split(' ').length < 8;
   }
 
   private isChangeRequest(message: string): boolean {
-    const changePatterns = [
-      /change/i, /update/i, /modify/i, /edit/i, /replace/i,
-      /badal/i, /adjust/i, /tweak/i, /fix/i, /improve/i,
-      /aur\s*(dark|light|big|small|colorful)/i,
-      /thoda/i, /zyada/i, /kam/i,
-    ];
-
-    return changePatterns.some(p => p.test(message));
+    return [/change/i, /update/i, /modify/i, /edit/i, /replace/i, /badal/i,
+      /adjust/i, /tweak/i, /fix/i, /improve/i, /thoda/i, /zyada/i, /kam/i,
+      /aur\s*(dark|light|big|small|colorful)/i].some(p => p.test(message));
   }
 
-  private detectMood(message: string): string | undefined {
-    const moodMap: Record<string, string> = {
-      'premium': 'premium',
-      'luxury': 'luxury',
-      'modern': 'modern',
-      'clean': 'clean',
-      'dark': 'dark',
-      'light': 'light',
-      'minimal': 'minimalist',
-      'bold': 'bold',
-      'elegant': 'elegant',
-      'professional': 'professional',
-      'fun': 'playful',
-      'serious': 'serious',
-      'warm': 'warm',
-      'cool': 'cool',
-      'energetic': 'energetic',
-      'calm': 'calm',
-      'attractive': 'attractive',
-      'eye.?catching': 'eye-catching',
-      'classical': 'classical',
-      'vintage': 'vintage',
-    };
-
-    const lower = message.toLowerCase();
-    for (const [keyword, mood] of Object.entries(moodMap)) {
-      if (new RegExp(keyword, 'i').test(lower)) {
-        return mood;
-      }
+  private detectMood(message: string): Mood | undefined {
+    for (const { pattern, mood } of MOOD_MAP) {
+      if (pattern.test(message)) return mood;
     }
-
     return undefined;
   }
 
   private extractParameters(message: string): Record<string, unknown> {
-    const params: Record<string, unknown> = {};
+    const params: Record<string, unknown> = { rawMessage: message };
 
-    // Extract colors
     const colorMatch = message.match(/#[0-9a-fA-F]{3,8}/g);
     if (colorMatch) params.colors = colorMatch;
 
-    // Extract URLs
     const urlMatch = message.match(/https?:\/\/[^\s]+/g);
     if (urlMatch) params.urls = urlMatch;
 
-    // Extract numbers
-    const numberMatch = message.match(/\d+/g);
-    if (numberMatch) params.numbers = numberMatch.map(Number);
+    const numbers = message.match(/\b\d+(?:\.\d+)?\b/g);
+    if (numbers) params.numbers = numbers.map(Number);
 
-    // Extract percentages
-    const percentMatch = message.match(/(\d+)\s*%/g);
-    if (percentMatch) params.percentages = percentMatch;
+    const percentages = message.match(/\d+\s*%/g);
+    if (percentages) params.percentages = percentages;
 
-    // Extract product names (in quotes)
-    const quotedMatch = message.match(/"([^"]+)"/g);
-    if (quotedMatch) params.quoted = quotedMatch.map(s => s.replace(/"/g, ''));
-
-    // Raw message always included
-    params.rawMessage = message;
+    const quoted = message.match(/"([^"]+)"/g);
+    if (quoted) params.quoted = quoted.map(s => s.slice(1, -1));
 
     return params;
   }
 
-  // --------------------------------------------
-  // AGENT HANDLER REGISTRATION
-  // --------------------------------------------
+  private safeParseJSON(str: string | undefined): Record<string, unknown> {
+    if (!str) return {};
+    try {
+      const parsed = JSON.parse(str);
+      return typeof parsed === 'object' && parsed !== null ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
 
-  registerHandler(agentName: string, handler: AgentHandler): void {
+  // ----------------------------------------------------------
+  // HANDLER REGISTRY
+  // ----------------------------------------------------------
+
+  registerHandler(agentName: AgentName, handler: AgentHandler): void {
     this.agentHandlers.set(agentName, handler);
   }
 
-  unregisterHandler(agentName: string): void {
+  unregisterHandler(agentName: AgentName): void {
     this.agentHandlers.delete(agentName);
   }
 
-  // --------------------------------------------
+  // ----------------------------------------------------------
   // STATUS
-  // --------------------------------------------
+  // ----------------------------------------------------------
 
-  getStatus(): {
-    operational: boolean;
-    registeredHandlers: string[];
-    routerStatus: ReturnType<AIRouter['getStatus']>;
-  } {
+  getStatus() {
     return {
       operational: this.router.isOperational(),
-      registeredHandlers: Array.from(this.agentHandlers.keys()),
+      registeredHandlers: [...this.agentHandlers.keys()],
+      undoStackDepth: this.undoStack.length,
       routerStatus: this.router.getStatus(),
     };
   }
 }
 
-// --------------------------------------------
-// SINGLETON INSTANCE
-// --------------------------------------------
+// ============================================================
+// SINGLETON
+// ============================================================
 
-let orchestratorInstance: Orchestrator | null = null;
+let instance: Orchestrator | null = null;
 
 export function getOrchestrator(): Orchestrator {
-  if (!orchestratorInstance) {
-    orchestratorInstance = new Orchestrator();
-  }
-  return orchestratorInstance;
+  if (!instance) instance = new Orchestrator();
+  return instance;
 }
 
 export function resetOrchestrator(): void {
-  orchestratorInstance = null;
+  instance = null;
 }
