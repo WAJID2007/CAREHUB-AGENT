@@ -967,12 +967,7 @@ Consider: revenue impact, implementation complexity, time-to-result, risks.`;
   }
 }
 /** Backward compatibility alias — ai-router.ts uses getStatus() */
-  getStatus(): {
-    available: boolean;
-    lastError: string | null;
-    remainingRequests: number;
-    consecutiveErrors: number;
-  } {
+  getStatus() {
     const s = this.getSystemStatus();
     return {
       available:         s.available,
