@@ -965,7 +965,7 @@ Consider: revenue impact, implementation complexity, time-to-result, risks.`;
     this.lastError = null;
     console.log('[GeminiClient] Status manually reset');
   }
-}
+
 /** Backward compatibility alias — ai-router.ts uses getStatus() */
   getStatus() {
     const s = this.getSystemStatus();
@@ -976,6 +976,7 @@ Consider: revenue impact, implementation complexity, time-to-result, risks.`;
       consecutiveErrors: s.consecutiveErrors,
     };
   }
+}
 // --------------------------------------------
 // SINGLETON — one instance per process
 // --------------------------------------------
