@@ -1123,7 +1123,7 @@ ${style.animationLevel === 'rich' ? `
         if (!liquid.includes('carehub-theme.css')) {
           // Add before 
           const cssLink = `\n  \n  {{ 'carehub-theme.css' | asset_url | stylesheet_tag }}\n`;
-          liquid = liquid.replace('', `${cssLink}`);
+          liquid = liquid.replace("</body>", `${cssLink}</body>`);
 
           await this.shopify.updateThemeAsset(themeId, {
             key: 'layout/theme.liquid',
