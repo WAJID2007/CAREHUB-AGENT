@@ -1139,7 +1139,57 @@ if (!liquid.includes('carehub-theme.css')) {
           });
         }
       }
+// Update Horizon color scheme settings
+try {
+  const settingsAsset = await this.shopify.getThemeAsset(themeId, 'config/settings_data.json');
+  if (settingsAsset.success && settingsAsset.data?.asset.value) {
+    const settings = JSON.parse(settingsAsset.data.asset.value);
+    
+    const darkColors = {
+      "background": design.colors.background,
+      "foreground_heading": design.colors.heading,
+      "foreground": design.colors.text,
+      "primary": design.colors.text,
+      "primary_hover": design.colors.accent,
+      "border": design.colors.border,
+      "shadow": "#000000",
+      "primary_button_background": design.colors.buttonBg,
+      "primary_button_text": design.colors.buttonText,
+      "primary_button_border": design.colors.buttonBg,
+      "primary_button_hover_background": design.colors.buttonHover,
+      "primary_button_hover_text": design.colors.buttonText,
+      "primary_button_hover_border": design.colors.buttonHover,
+      "secondary_button_background": "rgba(0,0,0,0)",
+      "secondary_button_text": design.colors.primary,
+      "secondary_button_border": design.colors.primary,
+      "secondary_button_hover_background": design.colors.surface,
+      "secondary_button_hover_text": design.colors.heading,
+      "secondary_button_hover_border": design.colors.accent,
+      "input_background": design.colors.surface,
+      "input_text_color": design.colors.text,
+      "input_border_color": design.colors.border,
+      "input_hover_background": design.colors.surface
+    };
 
+    // Update all schemes in current
+    const schemeKeys = Object.keys(settings.current?.color_schemes || {});
+    for (const key of schemeKeys) {
+      if (settings.current.color_schemes[key]?.settings) {
+        settings.current.color_schemes[key].settings = {
+          ...settings.current.color_schemes[key].settings,
+          ...darkColors
+        };
+      }
+    }
+
+    await this.shopify.updateThemeAsset(themeId, {
+      key: 'config/settings_data.json',
+      value: JSON.stringify(settings, null, 2),
+    });
+  }
+} catch (e) {
+  console.error('[ThemeDesigner] Settings update failed:', e);
+}
       console.log('[ThemeDesigner] Theme applied successfully ✅');
       return true;
     } catch (error) {
