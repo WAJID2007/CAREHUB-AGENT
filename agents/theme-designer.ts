@@ -1119,11 +1119,19 @@ ${style.animationLevel === 'rich' ? `
       if (themeContent.success && themeContent.data?.asset.value) {
         let liquid = themeContent.data.asset.value;
 
-        // Check if already injected
-        if (!liquid.includes('carehub-theme.css')) {
-          // Add before 
-          const cssLink = `\n  \n  {{ 'carehub-theme.css' | asset_url | stylesheet_tag }}\n`;
-          liquid = liquid.replace("</body>", `${cssLink}</body>`);
+        // Check if already injected 
+          const cssLink = `{{ 'carehub-theme.css' | asset_url | stylesheet_tag }}`;
+const colorOverride = `<style>
+body,html{background:#0a0a0f!important}
+[class*="color-scheme"],[class*="color-background"]{background:#0a0a0f!important;color:#e8e8e8!important}
+</style>`;
+
+if (!liquid.includes('carehub-theme.css')) {
+  liquid = liquid.replace(
+    '{{ content_for_header }}',
+    `{{ content_for_header }}\n  ${cssLink}\n  ${colorOverride}`
+  );
+
 
           await this.shopify.updateThemeAsset(themeId, {
             key: 'layout/theme.liquid',
