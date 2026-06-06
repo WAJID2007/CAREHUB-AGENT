@@ -1139,7 +1139,29 @@ if (!liquid.includes('carehub-theme.css')) {
           });
         }
       }
-
+// Update Horizon color scheme settings
+try {
+  const settingsAsset = await this.shopify.getThemeAsset(themeId, 'config/settings_data.json');
+  if (settingsAsset.success && settingsAsset.data?.asset.value) {
+    const settings = JSON.parse(settingsAsset.data.asset.value);
+    if (settings.current && settings.presets?.[settings.current]) {
+      const preset = settings.presets[settings.current];
+      preset.colors_background_1 = "#0a0a0f";
+      preset.colors_background_2 = "#12121a";
+      preset.colors_accent_1 = "#c9a962";
+      preset.colors_accent_2 = "#e2c275";
+      preset.colors_text = "#e8e8e8";
+      preset.colors_solid_button_labels = "#0a0a0f";
+      preset.colors_outline_button_labels = "#c9a962";
+      await this.shopify.updateThemeAsset(themeId, {
+        key: 'config/settings_data.json',
+        value: JSON.stringify(settings, null, 2),
+      });
+    }
+  }
+} catch (e) {
+  console.error('[ThemeDesigner] Settings update failed:', e);
+}
       console.log('[ThemeDesigner] Theme applied successfully ✅');
       return true;
     } catch (error) {
