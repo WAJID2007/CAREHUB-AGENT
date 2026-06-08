@@ -800,28 +800,56 @@ Join thousands of satisfied customers who've made the switch. Experience the dif
   }
 
   // Quick actions for natural language commands
-  async handleCommand(command: string): Promise {
-    const lower = command.toLowerCase();
+  async handleCommand(command: string): Promise<ProductManagerResult> {
+  const lower = command.toLowerCase();
 
-    if (lower.includes('list') || lower.includes('show') || lower.includes('dikhao')) {
-      return this.listProducts();
-    }
-
-    if (lower.includes('count') || lower.includes('kitne')) {
-      const count = await this.getProductCount();
-      return { success: true, message: `Total products: ${count}`, count };
-    }
-
-    if (lower.includes('stats')) {
-      const stats = await this.getProductStats();
-      return {
-        success: true,
-        message: `📊 Products: ${stats.total} total | ${stats.active} active | ${stats.draft} draft | ${stats.archived} archived`,
-      };
-    }
-
-    return { success: false, message: 'Could not understand the command. Try: list products, count products, or product stats.' };
+  if (lower.includes('list') || lower.includes('show') || lower.includes('dikhao') || lower.includes('dekho')) {
+    return this.listProducts();
   }
+
+  if (lower.includes('count') || lower.includes('kitne') || lower.includes('total')) {
+    const count = await this.getProductCount();
+    return { success: true, message: `Total products: ${count}`, count };
+  }
+
+  if (lower.includes('stats') || lower.includes('statistics')) {
+    const stats = await this.getProductStats();
+    return {
+      success: true,
+      message: `📊 Products: ${stats.total} total | ${stats.active} active | ${stats.draft} draft | ${stats.archived} archived`,
+    };
+  }
+
+  if (
+    lower.includes('import') || lower.includes('add') || lower.includes('lao') ||
+    lower.includes('dalo') || lower.includes('karo') || lower.includes('trending') ||
+    lower.includes('cj') || lower.includes('supplier') || lower.includes('product') ||
+    lower.includes('upload') || lower.includes('store par') || lower.includes('la do') ||
+    lower.includes('mangao') || lower.includes('le ao')
+  ) {
+    const numMatch = lower.match(/\b(\d+)\b/);
+    const maxProducts = numMatch ? Math.min(parseInt(numMatch[1]), 20) : 10;
+
+    let searchQuery = 'trending health wellness products';
+    const keywords = ['health', 'beauty', 'skincare', 'fitness', 'wellness', 'kitchen', 'home', 'electronics', 'clothing', 'accessories'];
+    for (const kw of keywords) {
+      if (lower.includes(kw)) { searchQuery = kw; break; }
+    }
+
+    return this.importFromSupplier({
+      supplier: 'cj',
+      searchQuery,
+      maxProducts,
+      autoDescription: true,
+      status: 'draft',
+    });
+  }
+
+  return {
+    success: false,
+    message: 'Command samajh nahi aya. Try karo:\n• "list products"\n• "add 10 trending products"\n• "import health products"\n• "product stats"',
+  };
+}
 }
 
 // --------------------------------------------
