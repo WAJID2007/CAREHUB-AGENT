@@ -1668,62 +1668,7 @@ Return ONLY the text, nothing else. No quotes, no explanation.`;
     return false;
   }
 }
-    try {
-      const themeResponse = await this.shopify.getMainTheme();
-      if (!themeResponse.success || !themeResponse.data) return false;
-
-      const themeId = themeResponse.data.id;
-
-      // Upload homepage CSS
-      await this.shopify.updateThemeAsset(themeId, {
-        key: 'assets/carehub-homepage.css',
-        value: cssCode,
-      });
-
-      // Upload homepage section as snippet
-      await this.shopify.updateThemeAsset(themeId, {
-        key: 'snippets/carehub-homepage.liquid',
-        value: liquidCode,
-      });
-
-      // Inject into index template
-      const indexTemplate = await this.shopify.getThemeAsset(themeId, 'templates/index.liquid');
-      if (indexTemplate.success && indexTemplate.data?.asset.value) {
-        let content = indexTemplate.data.asset.value;
-        if (!content.includes('carehub-homepage')) {
-          content = `{{ 'carehub-homepage.css' | asset_url | stylesheet_tag }}\n{% render 'carehub-homepage' %}\n\n${content}`;
-          await this.shopify.updateThemeAsset(themeId, {
-            key: 'templates/index.liquid',
-            value: content,
-          });
-        }
-      } else {
-        // Try JSON template (Dawn theme uses JSON templates)
-        const jsonTemplate = await this.shopify.getThemeAsset(themeId, 'templates/index.json');
-        if (jsonTemplate.success) {
-          // For JSON templates, inject via theme.liquid or a section
-          const themeLiquid = await this.shopify.getThemeAsset(themeId, 'layout/theme.liquid');
-          if (themeLiquid.success && themeLiquid.data?.asset.value) {
-            let themeContent = themeLiquid.data.asset.value;
-            if (!themeContent.includes('carehub-homepage.css')) {
-              const cssInject = `  {{ 'carehub-homepage.css' | asset_url | stylesheet_tag }}\n`;
-              themeContent = themeContent.replace('', `${cssInject}`);
-              await this.shopify.updateThemeAsset(themeId, {
-                key: 'layout/theme.liquid',
-                value: themeContent,
-              });
-            }
-          }
-        }
-      }
-
-      return true;
-    } catch (error) {
-      console.error('[Homepage] Error applying to store:', error);
-      return false;
-    }
-  }
-
+    
   // --------------------------------------------
   // SECTION MANAGEMENT
   // --------------------------------------------
