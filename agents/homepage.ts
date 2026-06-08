@@ -1604,6 +1604,70 @@ Return ONLY the text, nothing else. No quotes, no explanation.`;
   }
 
   private async applyToStore(liquidCode: string, cssCode: string): Promise<boolean> {
+  try {
+    const themeResponse = await this.shopify.getMainTheme();
+    if (!themeResponse.success || !themeResponse.data) return false;
+    const themeId = themeResponse.data.id;
+
+    // Upload homepage CSS
+    await this.shopify.updateThemeAsset(themeId, {
+      key: 'assets/carehub-homepage.css',
+      value: cssCode,
+    });
+
+    // Upload homepage as snippet
+    await this.shopify.updateThemeAsset(themeId, {
+      key: 'snippets/carehub-homepage.liquid',
+      value: liquidCode,
+    });
+
+    // Try legacy index.liquid first (old themes)
+    const indexTemplate = await this.shopify.getThemeAsset(themeId, 'templates/index.liquid');
+    if (indexTemplate.success && indexTemplate.data?.asset.value) {
+      let content = indexTemplate.data.asset.value;
+      if (!content.includes('carehub-homepage')) {
+        content = `{{ 'carehub-homepage.css' | asset_url | stylesheet_tag }}\n{% render 'carehub-homepage' %}\n\n${content}`;
+        await this.shopify.updateThemeAsset(themeId, {
+          key: 'templates/index.liquid',
+          value: content,
+        });
+      }
+    } else {
+      // JSON template theme (Dawn, Sense, Refresh etc.)
+      const themeLiquid = await this.shopify.getThemeAsset(themeId, 'layout/theme.liquid');
+      if (themeLiquid.success && themeLiquid.data?.asset.value) {
+        let themeContent = themeLiquid.data.asset.value;
+
+        // Step 1: Add CSS link before </head>
+        if (!themeContent.includes('carehub-homepage.css')) {
+          themeContent = themeContent.replace(
+            '</head>',
+            `  {{ 'carehub-homepage.css' | asset_url | stylesheet_tag }}\n</head>`
+          );
+        }
+
+        // Step 2: CRITICAL FIX — inject render tag before content_for_layout
+        // This renders the snippet ONLY on the homepage
+        if (!themeContent.includes('carehub-homepage')) {
+          themeContent = themeContent.replace(
+            '{{ content_for_layout }}',
+            `{%- if request.page_type == 'index' -%}\n  {%- render 'carehub-homepage' -%}\n{%- endif -%}\n{{ content_for_layout }}`
+          );
+        }
+
+        await this.shopify.updateThemeAsset(themeId, {
+          key: 'layout/theme.liquid',
+          value: themeContent,
+        });
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error('[Homepage] Error applying to store:', error);
+    return false;
+  }
+}
     try {
       const themeResponse = await this.shopify.getMainTheme();
       if (!themeResponse.success || !themeResponse.data) return false;
